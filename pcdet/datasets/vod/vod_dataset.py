@@ -30,6 +30,11 @@ class VodDataset(DatasetTemplate):
         self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
 
         self.vod_infos = []
+        if hasattr(self.dataset_cfg, "DECOMPOSE"):
+            self.decompose = self.dataset_cfg.DECOMPOSE
+        else:
+            self.decompose = False
+        
         self.include_vod_data(self.mode)
 
     def include_vod_data(self, mode):
@@ -66,15 +71,24 @@ class VodDataset(DatasetTemplate):
         # return np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, 4)
         number_of_channels = 7  # ['x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time']
         points = np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, number_of_channels)
-
-        # replace the list values with statistical values; for x, y, z and time, use 0 and 1 as means and std to avoid normalization
-        means = [0, 0, 0, 0, 0, 0, 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
-        stds =  [1, 1, 1, 1, 1, 1, 1]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
+        if self.decompose:
+            v_r_comp_x = np.cos(np.arctan(points[:, 1] / points[:, 0])) * points[:, 5]
+            v_r_comp_y = np.sin(np.arctan(points[:, 1] / points[:, 0])) * points[:, 5] 
+            points = np.insert(points, 6, v_r_comp_x, axis=1) # ['x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'v_r_comp_x', 'v_r_comp_y', 'time']
+            points = np.insert(points, 7, v_r_comp_y, axis=1)
+            means = [0, 0, 0, 0, 0, 0, 0, 0, 0] 
+            stds =  [1, 1, 1, 1, 1, 1, 1, 1, 1]
+        else:
+            # replace the list values with statistical values; for x, y, z and time, use 0 and 1 as means and std to avoid normalization
+            means = [0, 0, 0, 0, 0, 0, 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
+            stds =  [1, 1, 1, 1, 1, 1, 1]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
 
         #in practice, you should use either train, or train+val values to calculate mean and stds. Note that x, y, z, and time are not normed, but you can experiment with that.
         #means = [0, 0, 0, mean_RCS (~ -13.0), mean_v_r (~-3.0), mean_vr_comp (~ -0.1), 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
         #stds =  [1, 1, 1, std_RCS (~14.0),  std_v_r (~8.0),    std_v_r_comp (~6.0), 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
         #we then norm the channels
+        # means = [0, 0, 0, -13.0, -3.0, -0.1, 0]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
+        # stds =  [1, 1, 1, 14.0, 8.0, 6.0, 1]  # 'x', 'y', 'z', 'rcs', 'v_r', 'v_r_comp', 'time'
         points = (points - means) /stds
         return points 
 
@@ -368,11 +382,47 @@ class VodDataset(DatasetTemplate):
         if 'annos' not in self.vod_infos[0].keys():
             return None, {}
 
-        from .vod_object_eval_python import eval as kitti_eval
+        # from .vod_object_eval_python import eval as kitti_eval
 
         eval_det_annos = copy.deepcopy(det_annos)
         eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.vod_infos]
-        ap_result_str, ap_dict = kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names)
+        # ap_result_str, ap_dict = kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names)
+
+        from .vod_object_eval_python import vod_eval as vod_official_evaluate
+        # from vod.evaluation import kitti_official_evaluate as vod_official_evaluate
+        from .vod_object_eval_python import eval
+        res_dict = {}
+        ap_result_str = ""
+        ap_dict = {}
+        res_dict.update(vod_official_evaluate.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names, custom_method=0))
+        res_dict.update(vod_official_evaluate.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names, custom_method=3))
+        for metric_k, metric_v in res_dict.items():
+                for k, v in metric_v.items():
+                    ap_dict[metric_k + '_' + k] = v
+        # ap_result_str += eval.print_str((f"Results: \n"
+        #   f"Entire annotated area: \n"
+        #   f"Car: {ap_dict['entire_area']['Car_3d_all']} \n"
+        #   f"Pedestrian: {ap_dict['entire_area']['Pedestrian_3d_all']} \n"
+        #   f"Cyclist: {ap_dict['entire_area']['Cyclist_3d_all']} \n"
+        #   f"mAP: {(ap_dict['entire_area']['Car_3d_all'] + ap_dict['entire_area']['Pedestrian_3d_all'] + ap_dict['entire_area']['Cyclist_3d_all']) / 3} \n"
+        #   f"Driving corridor area: \n"
+        #   f"Car: {ap_dict['roi']['Car_3d_all']} \n"
+        #   f"Pedestrian: {ap_dict['roi']['Pedestrian_3d_all']} \n"
+        #   f"Cyclist: {ap_dict['roi']['Cyclist_3d_all']} \n"
+        #   f"mAP: {(ap_dict['roi']['Car_3d_all'] + ap_dict['roi']['Pedestrian_3d_all'] + ap_dict['roi']['Cyclist_3d_all']) / 3} \n"
+        #   ))
+        ap_result_str += eval.print_str((f"Results: \n"
+          f"Entire annotated area: \n"
+          f"Car: {ap_dict['entire_area_Car_3d_all']} \n"
+          f"Pedestrian: {ap_dict['entire_area_Pedestrian_3d_all']} \n"
+          f"Cyclist: {ap_dict['entire_area_Cyclist_3d_all']} \n"
+          f"mAP: {(ap_dict['entire_area_Car_3d_all'] + ap_dict['entire_area_Pedestrian_3d_all'] + ap_dict['entire_area_Cyclist_3d_all']) / 3} \n"
+          f"Driving corridor area: \n"
+          f"Car: {ap_dict['roi_Car_3d_all']} \n"
+          f"Pedestrian: {ap_dict['roi_Pedestrian_3d_all']} \n"
+          f"Cyclist: {ap_dict['roi_Cyclist_3d_all']} \n"
+          f"mAP: {(ap_dict['roi_Car_3d_all'] + ap_dict['roi_Pedestrian_3d_all'] + ap_dict['roi_Cyclist_3d_all']) / 3} \n"
+          ))
 
         return ap_result_str, ap_dict
 
